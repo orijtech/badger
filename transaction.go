@@ -84,6 +84,7 @@ func (o *oracle) readTs() uint64 {
 	if o.isManaged {
 		return math.MaxUint64
 	}
+	fmt.Printf("All good. about to load o.curRead\n")
 	return atomic.LoadUint64(&o.curRead)
 }
 
@@ -338,6 +339,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 //
 // NOTE: If any operations are run on a discarded transaction, ErrDiscardedTxn is returned.
 func (txn *Txn) Discard() {
+	fmt.Printf("Entered Txn.Discard()\n")
 	if txn.discarded { // Avoid a re-run.
 		return
 	}
@@ -349,6 +351,7 @@ func (txn *Txn) Discard() {
 	if txn.update {
 		txn.db.orc.decrRef()
 	}
+	fmt.Printf("Exit Txn.Discard()\n")
 }
 
 // Commit commits the transaction, following these steps:

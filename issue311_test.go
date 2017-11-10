@@ -3,7 +3,6 @@ package badger
 import (
 	"io/ioutil"
 	"os"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -39,21 +38,8 @@ func TestPersistentCache_DirectBadger(t *testing.T) {
 }
 
 type orc struct {
-	isManaged bool // Does not change value, so no locking required.
-
-	sync.Mutex
-	curRead    uint64
-	nextCommit uint64
-
-	// These two structures are used to figure out when a commit is done. The minimum done commit is
-	// used to update curRead.
-	commitMark     uint64Heap
-	pendingCommits map[uint64]struct{}
-
-	// commits stores a key fingerprint and latest commit counter for it.
-	// refCount is used to clear out commits map to avoid a memory blowup.
-	commits  map[uint64]uint64
-	refCount int64
+	isManaged bool
+	curRead   uint64
 }
 
 func TestAtomicLoadArm(t *testing.T) {

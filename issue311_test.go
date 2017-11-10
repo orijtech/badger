@@ -3,6 +3,7 @@ package badger
 import (
 	"io/ioutil"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dgraph-io/badger/options"
@@ -29,11 +30,7 @@ func TestPersistentCache_DirectBadger(t *testing.T) {
 		t.Fatalf("cannot open db at location %s: %v", dir, err)
 	}
 
-	err = db.View(func(txn *Txn) error { return nil })
-
-	if err != nil {
-		t.Fatal(err)
-	}
+	atomic.LoadUint64(&db.orc.curRead)
 
 	if err = db.Close(); err != nil {
 		t.Fatal(err)

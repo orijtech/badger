@@ -494,48 +494,39 @@ func TestPartialAppendToValueLog(t *testing.T) {
 
 func TestValueLogTrigger(t *testing.T) {
 	t.Skip("Difficult to trigger compaction, so skipping. Re-enable after fixing #226")
-	dir, err := ioutil.TempDir("", "badger")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-
-	opt := getTestOptions(dir)
-	opt.ValueLogFileSize = 1 << 20
-	kv, err := Open(opt)
-	require.NoError(t, err)
-
-	// Write a lot of data, so it creates some work for valug log GC.
-	sz := 32 << 10
-	txn := kv.NewTransaction(true)
-	for i := 0; i < 100; i++ {
-		v := make([]byte, sz)
-		rand.Read(v[:rand.Intn(sz)])
-		require.NoError(t, txn.Set([]byte(fmt.Sprintf("key%d", i)), v))
-		if i%20 == 0 {
-			require.NoError(t, txn.Commit(nil))
-			txn = kv.NewTransaction(true)
+	opts := getTestOptions("")
+	opts.ValueLogFileSize = 1 << 20
+	runBadgerTest(t, &opts, func(t *testing.T, db *DB) {
+		// Write a lot of data, so it creates some work for valug log GC.
+		sz := 32 << 10
+		txn := db.NewTransaction(true)
+		for i := 0; i < 100; i++ {
+			v := make([]byte, sz)
+			rand.Read(v[:rand.Intn(sz)])
+			require.NoError(t, txn.Set([]byte(fmt.Sprintf("key%d", i)), v))
+			if i%20 == 0 {
+				require.NoError(t, txn.Commit(nil))
+				txn = db.NewTransaction(true)
+			}
 		}
-	}
-	require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit(nil))
 
-	for i := 0; i < 45; i++ {
-		txnDelete(t, kv, []byte(fmt.Sprintf("key%d", i)))
-	}
+		for i := 0; i < 45; i++ {
+			txnDelete(t, db, []byte(fmt.Sprintf("key%d", i)))
+		}
 
-	require.NoError(t, kv.PurgeOlderVersions())
-	require.NoError(t, kv.RunValueLogGC(0.5))
+		require.NoError(t, db.PurgeOlderVersions())
+		require.NoError(t, db.RunValueLogGC(0.5))
 
-	require.NoError(t, kv.Close())
+		require.NoError(t, db.Close())
 
-	err = kv.RunValueLogGC(0.5)
-	require.Equal(t, ErrRejected, err, "Error should be returned after closing DB.")
+		err := db.RunValueLogGC(0.5)
+		require.Equal(t, ErrRejected, err, "Error should be returned after closing DB.")
+	})
 }
 
 func TestValueLogGC(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-
-	opt := getTestOptions(dir)
+	opt := getTestOptions("")
 	opt.ValueLogFileSize = 15 << 20
 	runBadgerTest(t, &opt, func(t *testing.T, kv *DB) {
 		sz := 32 << 10

@@ -80,7 +80,12 @@ func txnDelete(t *testing.T, kv *DB, key []byte) {
 	require.NoError(t, txn.Commit(nil))
 }
 
-// Opens a badger db and runs a a test on it.
+// Helper function to open a badger db and runs test on it.
+//
+// * If opts is nil, it creates a new Options struct with some default values.
+//
+// * If opts.dir is set to empty string, it will populate it with a valid tmp
+//   directory entry before calling the test func.
 func runBadgerTest(t *testing.T, opts *Options, test func(t *testing.T, db *DB)) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -88,6 +93,9 @@ func runBadgerTest(t *testing.T, opts *Options, test func(t *testing.T, db *DB))
 	if opts == nil {
 		opts = new(Options)
 		*opts = getTestOptions(dir)
+	} else if opts.Dir == "" {
+		opts.Dir = dir
+		opts.ValueDir = dir
 	}
 	db, err := Open(*opts)
 	require.NoError(t, err)

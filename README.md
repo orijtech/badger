@@ -35,6 +35,7 @@ version.
     + [Iterating over keys](#iterating-over-keys)
       - [Prefix scans](#prefix-scans)
       - [Key-only iteration](#key-only-iteration)
+    * [Copying `Item` values](#copying-item-values)
     + [Garbage Collection](#garbage-collection)
     + [Database backup](#database-backup)
     + [Memory usage](#memory-usage)
@@ -390,6 +391,53 @@ err := db.View(func(txn *badger.Txn) error {
   }
   return nil
 })
+```
+
+### Copying `Item` values
+Badger uses `Item` struct pointers to return values for `Txn.Get()` and for
+returning results during iterations. For efficiency, Badger reuses `Item`s to
+avoid allocating too much memory. Hence `Item`s must be copied if they are used
+outside of a transaction, or outside the iteration loop. For example this code
+will cause bugs:
+
+```Go
+var item *badger.Item
+db.View(func(txn *Txn) error {
+  item, _ = txn.Get([]byte("somekey"))
+})
+
+val,_ := item.Value()
+fmt.Printf("Value is %s\n", val)
+```
+
+Instead, the correct way to access the outside the transaction, is to copy it
+using `Item.ValueCopy()`.
+
+Another way to cause buggy behavior is to reuse the item fields outside of an
+iteration loop. For example:
+
+```Go
+db.Update(func(tx *badger.Txn) error {
+	it := tx.NewIterator(badger.DefaultIteratorOptions)
+	defer it.Close()
+
+  for it.Rewind() ; it.ValidForPrefix(b); it.Next() {
+		tx.Delete(it.Item().Key())
+	}
+  return nil
+})
+```
+
+In the code above, `txn.Delete` uses `it.Item().Key()`, but the actual delete
+operation takes place once the iteration has completed, and the transaction is
+being committed. At that time, the slice returned by `it.Item().Key()` could
+have been reused. So the correct way to use the key is to pass a copy of the key
+as follows:
+
+```Go
+key := make([]byte, len(it.Item().Key()))
+key := copy(key, it.Item().Key())
+err := tx.Delete(key)
 ```
 
 ### Garbage Collection

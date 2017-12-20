@@ -34,8 +34,14 @@ const (
 	prefetched prefetchStatus = iota + 1
 )
 
-// Item is returned during iteration. Both the Key() and Value() output is only valid until
-// iterator.Next() is called.
+// Item holds an entry obtained from the Badger database.
+// It is retured as a result of Txn.Get(), or as individual
+// entries during an iteration.
+//
+// Item could be reused during iterations, and they become invalid once a
+// transaction has finished, so clients must be careful when using it. When in
+// doubt, it is best to make a copy of the public fields, especially Item.Key()
+// and Item.Value() for later use.
 type Item struct {
 	status    prefetchStatus
 	err       error

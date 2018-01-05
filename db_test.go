@@ -149,7 +149,7 @@ func TestConcurrentWrite(t *testing.T) {
 			go func(i int) {
 				defer wg.Done()
 				for j := 0; j < m; j++ {
-					txnSet(t, db, []byte(fmt.Sprintf("k2%05d_%08d", i, j)),
+					txnSet(t, db, []byte(fmt.Sprintf("k%05d_%08d", i, j)),
 						[]byte(fmt.Sprintf("v%05d_%08d", i, j)), byte(j%127))
 				}
 			}(i)
@@ -1051,7 +1051,7 @@ func TestWriteDeadlock(t *testing.T) {
 	print := func(count *int) {
 		*count++
 		if *count%100 == 0 {
-			fmt.Printf("%05d\r", *count)
+			fmt.Printf("%05d", *count)
 		}
 	}
 

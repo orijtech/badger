@@ -18,6 +18,7 @@ package badger
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -32,7 +33,8 @@ func TestDumpLoad(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
-	db, err := Open(getTestOptions(dir))
+	ctx := context.Background()
+	db, err := Open(ctx, getTestOptions(dir))
 	require.NoError(t, err)
 
 	// Write some stuff
@@ -46,9 +48,9 @@ func TestDumpLoad(t *testing.T) {
 		{key: []byte("answer2"), val: []byte("43"), userMeta: 1, version: 2},
 	}
 
-	err = db.Update(func(txn *Txn) error {
+	err = db.Update(ctx, func(ctx context.Context, txn *Txn) error {
 		e := entries[0]
-		err := txn.SetWithMeta(e.key, e.val, e.userMeta)
+		err := txn.SetWithMeta(ctx, e.key, e.val, e.userMeta)
 		if err != nil {
 			return err
 		}
@@ -56,9 +58,9 @@ func TestDumpLoad(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = db.Update(func(txn *Txn) error {
+	err = db.Update(ctx, func(ctx context.Context, txn *Txn) error {
 		e := entries[1]
-		err := txn.SetWithMeta(e.key, e.val, e.userMeta)
+		err := txn.SetWithMeta(ctx, e.key, e.val, e.userMeta)
 		if err != nil {
 			return err
 		}
@@ -72,25 +74,25 @@ func TestDumpLoad(t *testing.T) {
 	defer os.RemoveAll(dir)
 	bak, err := ioutil.TempFile(dir, "badgerbak")
 	require.NoError(t, err)
-	ts, err := db.Backup(bak, 0)
+	ts, err := db.Backup(ctx, bak, 0)
 	t.Logf("New ts: %d\n", ts)
 	require.NoError(t, err)
 	require.NoError(t, bak.Close())
-	require.NoError(t, db.Close())
+	require.NoError(t, db.Close(ctx))
 
-	db, err = Open(getTestOptions(dir))
+	db, err = Open(ctx, getTestOptions(dir))
 	require.NoError(t, err)
-	defer db.Close()
+	defer db.Close(ctx)
 	bak, err = os.Open(bak.Name())
 	require.NoError(t, err)
 	defer bak.Close()
 
-	require.NoError(t, db.Load(bak))
+	require.NoError(t, db.Load(ctx, bak))
 
-	err = db.View(func(txn *Txn) error {
+	err = db.View(ctx, func(ctx context.Context, txn *Txn) error {
 		opts := DefaultIteratorOptions
 		opts.AllVersions = true
-		it := txn.NewIterator(opts)
+		it := txn.NewIterator(ctx, opts)
 		var count int
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
@@ -123,10 +125,11 @@ func Test_BackupRestore(t *testing.T) {
 	s2Path := filepath.Join(tmpdir, "test2")
 	s3Path := filepath.Join(tmpdir, "test3")
 
+	ctx := context.Background()
 	opts := DefaultOptions
 	opts.Dir = s1Path
 	opts.ValueDir = s1Path
-	db1, err := Open(opts)
+	db1, err := Open(ctx, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,28 +137,28 @@ func Test_BackupRestore(t *testing.T) {
 	key2 := []byte("key2")
 	rawValue := []byte("NotLongValue")
 	N := byte(251)
-	err = db1.Update(func(tx *Txn) error {
-		if err := tx.Set(key1, rawValue); err != nil {
+	err = db1.Update(ctx, func(ctx context.Context, tx *Txn) error {
+		if err := tx.Set(ctx, key1, rawValue); err != nil {
 			return err
 		}
-		return tx.Set(key2, rawValue)
+		return tx.Set(ctx, key2, rawValue)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := byte(0); i < N; i++ {
-		err = db1.Update(func(tx *Txn) error {
-			if err := tx.Set(append(key1, i), rawValue); err != nil {
+		err = db1.Update(ctx, func(cctx context.Context, tx *Txn) error {
+			if err := tx.Set(cctx, append(key1, i), rawValue); err != nil {
 				return err
 			}
-			return tx.Set(append(key2, i), rawValue)
+			return tx.Set(cctx, append(key2, i), rawValue)
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 	var backup bytes.Buffer
-	_, err = db1.Backup(&backup, 0)
+	_, err = db1.Backup(ctx, &backup, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,19 +167,19 @@ func Test_BackupRestore(t *testing.T) {
 	opts = DefaultOptions
 	opts.Dir = s2Path
 	opts.ValueDir = s2Path
-	db2, err := Open(opts)
+	db2, err := Open(ctx, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = db2.Load(&backup)
+	err = db2.Load(ctx, &backup)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for i := byte(0); i < N; i++ {
-		err = db2.View(func(tx *Txn) error {
+		err = db2.View(ctx, func(cctx context.Context, tx *Txn) error {
 			k := append(key1, i)
-			item, err := tx.Get(k)
+			item, err := tx.Get(cctx, k)
 			if err != nil {
 				if err == ErrKeyNotFound {
 					return fmt.Errorf("Key %q has been not found, but was set\n", k)
@@ -198,11 +201,11 @@ func Test_BackupRestore(t *testing.T) {
 	}
 
 	for i := byte(0); i < N; i++ {
-		err = db2.Update(func(tx *Txn) error {
-			if err := tx.Set(append(key1, i), rawValue); err != nil {
+		err = db2.Update(ctx, func(cctx context.Context, tx *Txn) error {
+			if err := tx.Set(cctx, append(key1, i), rawValue); err != nil {
 				return err
 			}
-			return tx.Set(append(key2, i), rawValue)
+			return tx.Set(ctx, append(key2, i), rawValue)
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -210,7 +213,7 @@ func Test_BackupRestore(t *testing.T) {
 	}
 
 	backup.Reset()
-	_, err = db2.Backup(&backup, 0)
+	_, err = db2.Backup(ctx, &backup, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,20 +221,20 @@ func Test_BackupRestore(t *testing.T) {
 	opts = DefaultOptions
 	opts.Dir = s3Path
 	opts.ValueDir = s3Path
-	db3, err := Open(opts)
+	db3, err := Open(ctx, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = db3.Load(&backup)
+	err = db3.Load(ctx, &backup)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for i := byte(0); i < N; i++ {
-		err = db3.View(func(tx *Txn) error {
+		err = db3.View(ctx, func(ctx context.Context, tx *Txn) error {
 			k := append(key1, i)
-			item, err := tx.Get(k)
+			item, err := tx.Get(ctx, k)
 			if err != nil {
 				if err == ErrKeyNotFound {
 					return fmt.Errorf("Key %q has been not found, but was set\n", k)

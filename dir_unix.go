@@ -25,7 +25,10 @@ import (
 	"path/filepath"
 
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
+
+	"go.opencensus.io/trace"
 )
 
 // directoryLockGuard holds a lock on a directory and a pid file inside.  The pid file isn't part
@@ -42,7 +45,10 @@ type directoryLockGuard struct {
 // acquireDirectoryLock gets a lock on the directory (using flock). If
 // this is not read-only, it will also write our pid to
 // dirPath/pidFileName for convenience.
-func acquireDirectoryLock(dirPath string, pidFileName string, readOnly bool) (*directoryLockGuard, error) {
+func acquireDirectoryLock(ctx context.Context, dirPath string, pidFileName string, readOnly bool) (*directoryLockGuard, error) {
+	ctx, span := trace.StartSpan(ctx, "acquireDirectoryLock")
+	defer span.End()
+
 	// Convert to absolute path so that Release still works even if we do an unbalanced
 	// chdir in the meantime.
 	absPidFilePath, err := filepath.Abs(filepath.Join(dirPath, pidFileName))
@@ -80,7 +86,8 @@ func acquireDirectoryLock(dirPath string, pidFileName string, readOnly bool) (*d
 }
 
 // Release deletes the pid file and releases our lock on the directory.
-func (guard *directoryLockGuard) release() error {
+func (guard *directoryLockGuard) release(ctx context.Context) error {
+	_, span := trace.StartSpan(ctx, "directoryLockGuard.release")
 	var err error
 	if !guard.readOnly {
 		// It's important that we remove the pid file first.
@@ -92,6 +99,7 @@ func (guard *directoryLockGuard) release() error {
 	}
 	guard.path = ""
 	guard.f = nil
+	span.End()
 
 	return err
 }

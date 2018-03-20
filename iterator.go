@@ -22,6 +22,9 @@ import (
 	"sync"
 	"time"
 
+	octrace "go.opencensus.io/trace"
+	"golang.org/x/net/context"
+
 	"github.com/dgraph-io/badger/options"
 
 	"github.com/dgraph-io/badger/y"
@@ -281,12 +284,15 @@ type Iterator struct {
 // key-value pairs would be fetched. The keys are returned in lexicographically sorted order.
 // Using prefetch is highly recommended if you're doing a long running iteration.
 // Avoid long running iterations in update transactions.
-func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
+func (txn *Txn) NewIterator(ctx context.Context, opt IteratorOptions) *Iterator {
+	ctx, span := octrace.StartSpan(ctx, "Txn.NewIterator")
+	defer span.End()
+
 	tables, decr := txn.db.getMemTables()
 	defer decr()
 	txn.db.vlog.incrIteratorCount()
 	var iters []y.Iterator
-	if itr := txn.newPendingWritesIterator(opt.Reverse); itr != nil {
+	if itr := txn.newPendingWritesIterator(ctx, opt.Reverse); itr != nil {
 		iters = append(iters, itr)
 	}
 	for i := 0; i < len(tables); i++ {

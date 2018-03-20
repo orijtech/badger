@@ -30,12 +30,15 @@ import (
 
 	"github.com/dgraph-io/badger/options"
 
+	"golang.org/x/net/context"
 	"golang.org/x/net/trace"
 
 	"github.com/dgraph-io/badger/skl"
 	"github.com/dgraph-io/badger/table"
 	"github.com/dgraph-io/badger/y"
 	"github.com/pkg/errors"
+
+	octrace "go.opencensus.io/trace"
 )
 
 var (
@@ -163,12 +166,15 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 }
 
 // Open returns a new DB object.
-func Open(opt Options) (db *DB, err error) {
+func Open(ctx context.Context, opt Options) (db *DB, err error) {
+	ctx, span := octrace.StartSpan(ctx, "Open")
+	defer span.End()
+
 	opt.maxBatchSize = (15 * opt.MaxTableSize) / 100
 	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
 
 	for _, path := range []string{opt.Dir, opt.ValueDir} {
-		dirExists, err := exists(path)
+		dirExists, err := exists(ctx, path)
 		if err != nil {
 			return nil, y.Wrapf(err, "Invalid Dir: %q", path)
 		}
@@ -192,24 +198,24 @@ func Open(opt Options) (db *DB, err error) {
 		return nil, err
 	}
 	var dirLockGuard, valueDirLockGuard *directoryLockGuard
-	dirLockGuard, err = acquireDirectoryLock(opt.Dir, lockFile, opt.ReadOnly)
+	dirLockGuard, err = acquireDirectoryLock(ctx, opt.Dir, lockFile, opt.ReadOnly)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if dirLockGuard != nil {
-			_ = dirLockGuard.release()
+			_ = dirLockGuard.release(ctx)
 		}
 	}()
 	if absValueDir != absDir {
-		valueDirLockGuard, err = acquireDirectoryLock(opt.ValueDir, lockFile, opt.ReadOnly)
+		valueDirLockGuard, err = acquireDirectoryLock(ctx, opt.ValueDir, lockFile, opt.ReadOnly)
 		if err != nil {
 			return nil, err
 		}
 	}
 	defer func() {
 		if valueDirLockGuard != nil {
-			_ = valueDirLockGuard.release()
+			_ = valueDirLockGuard.release(ctx)
 		}
 	}()
 	if !(opt.ValueLogFileSize <= 2<<30 && opt.ValueLogFileSize >= 1<<20) {
@@ -219,7 +225,7 @@ func Open(opt Options) (db *DB, err error) {
 		opt.ValueLogLoadingMode == options.MemoryMap) {
 		return nil, ErrInvalidLoadingMode
 	}
-	manifestFile, manifest, err := openOrCreateManifestFile(opt.Dir, opt.ReadOnly)
+	manifestFile, manifest, err := openOrCreateManifestFile(ctx, opt.Dir, opt.ReadOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +328,10 @@ func Open(opt Options) (db *DB, err error) {
 // Close closes a DB. It's crucial to call it to ensure all the pending updates
 // make their way to disk. Calling DB.Close() multiple times is not safe and would
 // cause panic.
-func (db *DB) Close() (err error) {
+func (db *DB) Close(ctx context.Context) (err error) {
+	ctx, span := octrace.StartSpan(ctx, "db.Close")
+	defer span.End()
+
 	db.elog.Printf("Closing database")
 	// Stop value GC first.
 	db.closers.valueGC.SignalAndWait()
@@ -403,12 +412,12 @@ func (db *DB) Close() (err error) {
 	db.elog.Finish()
 
 	if db.dirLockGuard != nil {
-		if guardErr := db.dirLockGuard.release(); err == nil {
+		if guardErr := db.dirLockGuard.release(ctx); err == nil {
 			err = errors.Wrap(guardErr, "DB.Close")
 		}
 	}
 	if db.valueDirGuard != nil {
-		if guardErr := db.valueDirGuard.release(); err == nil {
+		if guardErr := db.valueDirGuard.release(ctx); err == nil {
 			err = errors.Wrap(guardErr, "DB.Close")
 		}
 	}
@@ -618,7 +627,10 @@ func (db *DB) writeRequests(reqs []*request) error {
 	return nil
 }
 
-func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
+func (db *DB) sendToWriteCh(ctx context.Context, entries []*Entry) (*request, error) {
+	ctx, span := octrace.StartSpan(ctx, "DB.sendToWriteCh")
+	defer span.End()
+
 	var count, size int64
 	for _, e := range entries {
 		size += int64(e.estimateSize(db.opt.ValueThreshold))
@@ -703,8 +715,11 @@ func (db *DB) doWrites(lc *y.Closer) {
 // batchSet applies a list of badger.Entry. If a request level error occurs it
 // will be returned.
 //   Check(kv.BatchSet(entries))
-func (db *DB) batchSet(entries []*Entry) error {
-	req, err := db.sendToWriteCh(entries)
+func (db *DB) batchSet(ctx context.Context, entries []*Entry) error {
+	ctx, span := octrace.StartSpan(ctx, "Db.batchSet")
+	defer span.End()
+
+	req, err := db.sendToWriteCh(ctx, entries)
 	if err != nil {
 		return err
 	}
@@ -718,8 +733,11 @@ func (db *DB) batchSet(entries []*Entry) error {
 //   err := kv.BatchSetAsync(entries, func(err error)) {
 //      Check(err)
 //   }
-func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
-	req, err := db.sendToWriteCh(entries)
+func (db *DB) batchSetAsync(ctx context.Context, entries []*Entry, f func(error)) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.batchSetAsync")
+	defer span.End()
+
+	req, err := db.sendToWriteCh(ctx, entries)
 	if err != nil {
 		return err
 	}
@@ -855,7 +873,10 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 	return nil
 }
 
-func exists(path string) (bool, error) {
+func exists(ctx context.Context, path string) (bool, error) {
+	_, span := octrace.StartSpan(ctx, "exists")
+	defer span.End()
+
 	_, err := os.Stat(path)
 	if err == nil {
 		return true, nil
@@ -922,17 +943,23 @@ func (db *DB) updateSize(lc *y.Closer) {
 }
 
 // PurgeVersionsBelow will delete all versions of a key below the specified version
-func (db *DB) PurgeVersionsBelow(key []byte, ts uint64) error {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-	return db.purgeVersionsBelow(txn, key, ts)
+func (db *DB) PurgeVersionsBelow(ctx context.Context, key []byte, ts uint64) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.PurgeVersionsBelow")
+	defer span.End()
+
+	txn := db.NewTransaction(ctx, false)
+	defer txn.Discard(ctx)
+	return db.purgeVersionsBelow(ctx, txn, key, ts)
 }
 
-func (db *DB) purgeVersionsBelow(txn *Txn, key []byte, ts uint64) error {
+func (db *DB) purgeVersionsBelow(ctx context.Context, txn *Txn, key []byte, ts uint64) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.purgeVersionsBelow")
+	defer span.End()
+
 	opts := DefaultIteratorOptions
 	opts.AllVersions = true
 	opts.PrefetchValues = false
-	it := txn.NewIterator(opts)
+	it := txn.NewIterator(ctx, opts)
 	defer it.Close()
 
 	var entries []*Entry
@@ -954,7 +981,7 @@ func (db *DB) purgeVersionsBelow(txn *Txn, key []byte, ts uint64) error {
 			})
 		db.vlog.updateGCStats(item)
 	}
-	return db.batchSet(entries)
+	return db.batchSet(ctx, entries)
 }
 
 // PurgeOlderVersions deletes older versions of all keys.
@@ -963,12 +990,18 @@ func (db *DB) purgeVersionsBelow(txn *Txn, key []byte, ts uint64) error {
 // older versions that are no longer needed. The caller must make sure that
 // there are no long-running read transactions running before this function is
 // called, otherwise they will not work as expected.
-func (db *DB) PurgeOlderVersions() error {
-	return db.View(func(txn *Txn) error {
+func (db *DB) PurgeOlderVersions(ctx context.Context) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.PurgeOlderVersions")
+	defer span.End()
+
+	return db.View(ctx, func(ctx context.Context, txn *Txn) error {
+		ctx, span := octrace.StartSpan(ctx, "db.View/PurgeOlderVersions")
+		defer span.End()
+
 		opts := DefaultIteratorOptions
 		opts.AllVersions = true
 		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
+		it := txn.NewIterator(ctx, opts)
 		defer it.Close()
 
 		var entries []*Entry
@@ -978,13 +1011,13 @@ func (db *DB) PurgeOlderVersions() error {
 		errChan := make(chan error, 1)
 
 		// func to check for pending error before sending off a batch for writing
-		batchSetAsyncIfNoErr := func(entries []*Entry) error {
+		batchSetAsyncIfNoErr := func(ctx context.Context, entries []*Entry) error {
 			select {
 			case err := <-errChan:
 				return err
 			default:
 				wg.Add(1)
-				return txn.db.batchSetAsync(entries, func(err error) {
+				return txn.db.batchSetAsync(ctx, entries, func(err error) {
 					defer wg.Done()
 					if err != nil {
 						select {
@@ -1017,7 +1050,7 @@ func (db *DB) PurgeOlderVersions() error {
 			// Ensure that total batch size doesn't exceed maxBatchSize
 			if count == 1000 || count+1 >= int(db.opt.maxBatchCount) ||
 				size+curSize >= int(db.opt.maxBatchSize) {
-				if err := batchSetAsyncIfNoErr(entries); err != nil {
+				if err := batchSetAsyncIfNoErr(ctx, entries); err != nil {
 					return err
 				}
 				count = 0
@@ -1031,7 +1064,7 @@ func (db *DB) PurgeOlderVersions() error {
 
 		// Write last batch pending deletes
 		if count > 0 {
-			if err := batchSetAsyncIfNoErr(entries); err != nil {
+			if err := batchSetAsyncIfNoErr(ctx, entries); err != nil {
 				return err
 			}
 		}
@@ -1075,7 +1108,10 @@ func (db *DB) PurgeOlderVersions() error {
 //
 // Note: Every time GC is run, it would produce a spike of activity on the LSM
 // tree.
-func (db *DB) RunValueLogGC(discardRatio float64) error {
+func (db *DB) RunValueLogGC(ctx context.Context, discardRatio float64) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.RunValueLogGC")
+	defer span.End()
+
 	if discardRatio >= 1.0 || discardRatio <= 0.0 {
 		return ErrInvalidRequest
 	}
@@ -1095,12 +1131,15 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 	}
 
 	// Pick a log file and run GC
-	return db.vlog.runGC(discardRatio, head)
+	return db.vlog.runGC(ctx, discardRatio, head)
 }
 
 // Size returns the size of lsm and value log files in bytes. It can be used to decide how often to
 // call RunValueLogGC.
-func (db *DB) Size() (lsm int64, vlog int64) {
+func (db *DB) Size(ctx context.Context) (lsm int64, vlog int64) {
+	ctx, span := octrace.StartSpan(ctx, "DB.Size")
+	defer span.End()
+
 	if y.LSMSize.Get(db.opt.Dir) == nil {
 		lsm, vlog = 0, 0
 		return
@@ -1122,11 +1161,14 @@ type Sequence struct {
 
 // Next would return the next integer in the sequence, updating the lease by running a transaction
 // if needed.
-func (seq *Sequence) Next() (uint64, error) {
+func (seq *Sequence) Next(ctx context.Context) (uint64, error) {
+	ctx, span := octrace.StartSpan(ctx, "Sequence.Next")
+	defer span.End()
+
 	seq.Lock()
 	defer seq.Unlock()
 	if seq.next >= seq.leased {
-		if err := seq.updateLease(); err != nil {
+		if err := seq.updateLease(ctx); err != nil {
 			return 0, err
 		}
 	}
@@ -1138,13 +1180,16 @@ func (seq *Sequence) Next() (uint64, error) {
 // Release the leased sequence to avoid wasted integers. This should be done right
 // before closing the associated DB. However it is valid to use the sequence after
 // it was released, causing a new lease with full bandwidth.
-func (seq *Sequence) Release() error {
+func (seq *Sequence) Release(ctx context.Context) error {
+	ctx, span := octrace.StartSpan(ctx, "Sequence.Release")
+	defer span.End()
+
 	seq.Lock()
 	defer seq.Unlock()
-	err := seq.db.Update(func(txn *Txn) error {
+	err := seq.db.Update(ctx, func(ctx context.Context, txn *Txn) error {
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], seq.next)
-		return txn.Set(seq.key, buf[:])
+		return txn.Set(ctx, seq.key, buf[:])
 	})
 	if err != nil {
 		return err
@@ -1153,9 +1198,12 @@ func (seq *Sequence) Release() error {
 	return nil
 }
 
-func (seq *Sequence) updateLease() error {
-	return seq.db.Update(func(txn *Txn) error {
-		item, err := txn.Get(seq.key)
+func (seq *Sequence) updateLease(ctx context.Context) error {
+	return seq.db.Update(ctx, func(ctx context.Context, txn *Txn) error {
+		ctx, span := octrace.StartSpan(ctx, "Sequence.updateLease")
+		defer span.End()
+
+		item, err := txn.Get(ctx, seq.key)
 		if err == ErrKeyNotFound {
 			seq.next = 0
 		} else if err != nil {
@@ -1172,7 +1220,7 @@ func (seq *Sequence) updateLease() error {
 		lease := seq.next + seq.bandwidth
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], lease)
-		if err = txn.Set(seq.key, buf[:]); err != nil {
+		if err = txn.Set(ctx, seq.key, buf[:]); err != nil {
 			return err
 		}
 		seq.leased = lease
@@ -1184,7 +1232,10 @@ func (seq *Sequence) updateLease() error {
 // available, in the database. Sequence can be used to get a list of monotonically increasing
 // integers. Multiple sequences can be created by providing different keys. Bandwidth sets the
 // size of the lease, determining how many Next() requests can be served from memory.
-func (db *DB) GetSequence(key []byte, bandwidth uint64) (*Sequence, error) {
+func (db *DB) GetSequence(ctx context.Context, key []byte, bandwidth uint64) (*Sequence, error) {
+	ctx, span := octrace.StartSpan(ctx, "DB.GetSequence")
+	defer span.End()
+
 	switch {
 	case len(key) == 0:
 		return nil, ErrEmptyKey
@@ -1198,7 +1249,7 @@ func (db *DB) GetSequence(key []byte, bandwidth uint64) (*Sequence, error) {
 		leased:    0,
 		bandwidth: bandwidth,
 	}
-	err := seq.updateLease()
+	err := seq.updateLease(ctx)
 	return seq, err
 }
 
@@ -1224,8 +1275,11 @@ type MergeFunc func(existing, val []byte) []byte
 // GetMergeOperator creates a new MergeOperator for a given key and returns a
 // pointer to it. It also fires off a goroutine that performs a compaction using
 // the merge function that runs periodically, as specified by dur.
-func (db *DB) GetMergeOperator(key []byte,
+func (db *DB) GetMergeOperator(ctx context.Context, key []byte,
 	f MergeFunc, dur time.Duration) *MergeOperator {
+	ctx, span := octrace.StartSpan(ctx, "Db.GetMergeOperator")
+	defer span.End()
+
 	op := &MergeOperator{
 		f:      f,
 		db:     db,
@@ -1233,14 +1287,14 @@ func (db *DB) GetMergeOperator(key []byte,
 		closer: y.NewCloser(1),
 	}
 
-	go op.runCompactions(dur)
+	go op.runCompactions(ctx, dur)
 	return op
 }
 
-func (op *MergeOperator) iterateAndMerge(txn *Txn) (maxVersion uint64, val []byte, err error) {
+func (op *MergeOperator) iterateAndMerge(ctx context.Context, txn *Txn) (maxVersion uint64, val []byte, err error) {
 	opt := DefaultIteratorOptions
 	opt.AllVersions = true
-	it := txn.NewIterator(opt)
+	it := txn.NewIterator(ctx, opt)
 	var first bool
 	for it.Rewind(); it.ValidForPrefix(op.key); it.Next() {
 		item := it.Item()
@@ -1270,23 +1324,29 @@ func (op *MergeOperator) iterateAndMerge(txn *Txn) (maxVersion uint64, val []byt
 	return maxVersion, val, nil
 }
 
-func (op *MergeOperator) compact() error {
+func (op *MergeOperator) compact(ctx context.Context) error {
+	ctx, span := octrace.StartSpan(ctx, "MergeOperator.compact")
+	defer span.End()
+
 	op.Lock()
 	defer op.Unlock()
 	var maxVersion uint64
-	err := op.db.Update(func(txn *Txn) error {
+	err := op.db.Update(ctx, func(ctx context.Context, txn *Txn) error {
+		ctx, span := octrace.StartSpan(ctx, "DB.Update/MergeOperator.compact")
+		defer span.End()
+
 		var (
 			val []byte
 			err error
 		)
-		maxVersion, val, err = op.iterateAndMerge(txn)
+		maxVersion, val, err = op.iterateAndMerge(ctx, txn)
 		if err != nil {
 			return err
 		}
 
 		// Write value back to db
 		if maxVersion > op.skipAtOrBelow {
-			if err := txn.Set(op.key, val); err != nil {
+			if err := txn.Set(ctx, op.key, val); err != nil {
 				return err
 			}
 		}
@@ -1300,7 +1360,10 @@ func (op *MergeOperator) compact() error {
 	return nil
 }
 
-func (op *MergeOperator) runCompactions(dur time.Duration) {
+func (op *MergeOperator) runCompactions(ctx context.Context, dur time.Duration) {
+	ctx, span := octrace.StartSpan(ctx, "MergeOperator.runCompactions")
+	defer span.End()
+
 	ticker := time.NewTicker(dur)
 	defer op.closer.Done()
 	var stop bool
@@ -1311,12 +1374,12 @@ func (op *MergeOperator) runCompactions(dur time.Duration) {
 		case <-ticker.C: // wait for tick
 		}
 		oldSkipVersion := op.skipAtOrBelow
-		if err := op.compact(); err != nil {
+		if err := op.compact(ctx); err != nil {
 			log.Printf("Error while running merge operation: %s", err)
 		}
 		// Purge older versions if version has updated
 		if op.skipAtOrBelow > oldSkipVersion {
-			if err := op.db.PurgeVersionsBelow(op.key, op.skipAtOrBelow+1); err != nil {
+			if err := op.db.PurgeVersionsBelow(ctx, op.key, op.skipAtOrBelow+1); err != nil {
 				log.Printf("Error purging merged keys: %s", err)
 			}
 		}
@@ -1329,9 +1392,12 @@ func (op *MergeOperator) runCompactions(dur time.Duration) {
 
 // Add records a value in Badger which will eventually be merged by a background
 // routine into the values that were recorded by previous invocations to Add().
-func (op *MergeOperator) Add(val []byte) error {
-	return op.db.Update(func(txn *Txn) error {
-		return txn.Set(op.key, val)
+func (op *MergeOperator) Add(ctx context.Context, val []byte) error {
+	ctx, span := octrace.StartSpan(ctx, "MergeOperator.Add")
+	defer span.End()
+
+	return op.db.Update(ctx, func(ctx context.Context, txn *Txn) error {
+		return txn.Set(ctx, op.key, val)
 	})
 }
 
@@ -1339,12 +1405,15 @@ func (op *MergeOperator) Add(val []byte) error {
 // applying the merge function to all the values added so far.
 //
 // If Add has not been called even once, Get will return ErrKeyNotFound
-func (op *MergeOperator) Get() ([]byte, error) {
+func (op *MergeOperator) Get(ctx context.Context) ([]byte, error) {
+	ctx, span := octrace.StartSpan(ctx, "MergeOperator.Get")
+	defer span.End()
+
 	op.RLock()
 	defer op.RUnlock()
 	var existing []byte
-	err := op.db.View(func(txn *Txn) (err error) {
-		_, existing, err = op.iterateAndMerge(txn)
+	err := op.db.View(ctx, func(ctx context.Context, txn *Txn) (err error) {
+		_, existing, err = op.iterateAndMerge(ctx, txn)
 		return err
 	})
 	return existing, err
@@ -1352,6 +1421,8 @@ func (op *MergeOperator) Get() ([]byte, error) {
 
 // Stop waits for any pending merge to complete and then stops the background
 // goroutine.
-func (op *MergeOperator) Stop() {
+func (op *MergeOperator) Stop(ctx context.Context) {
+	_, span := octrace.StartSpan(ctx, "MergeOperator.Stop")
 	op.closer.SignalAndWait()
+	span.End()
 }

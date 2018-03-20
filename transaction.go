@@ -25,6 +25,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	octrace "go.opencensus.io/trace"
+	"golang.org/x/net/context"
+
 	"github.com/dgraph-io/badger/y"
 	farm "github.com/dgryski/go-farm"
 	"github.com/pkg/errors"
@@ -221,7 +224,9 @@ func (pi *pendingWritesIterator) Close() error {
 	return nil
 }
 
-func (txn *Txn) newPendingWritesIterator(reversed bool) *pendingWritesIterator {
+func (txn *Txn) newPendingWritesIterator(ctx context.Context, reversed bool) *pendingWritesIterator {
+	ctx, span := octrace.StartSpan(ctx, "Txn.newPendingWritesIterator")
+	defer span.End()
 	if !txn.update || len(txn.pendingWrites) == 0 {
 		return nil
 	}
@@ -229,6 +234,7 @@ func (txn *Txn) newPendingWritesIterator(reversed bool) *pendingWritesIterator {
 	for _, e := range txn.pendingWrites {
 		entries = append(entries, e)
 	}
+	ctx, sspan := octrace.StartSpan(ctx, "sortPendingWritesPerTransaction")
 	// Number of pending writes per transaction shouldn't be too big in general.
 	sort.Slice(entries, func(i, j int) bool {
 		cmp := bytes.Compare(entries[i].Key, entries[j].Key)
@@ -237,6 +243,7 @@ func (txn *Txn) newPendingWritesIterator(reversed bool) *pendingWritesIterator {
 		}
 		return cmp > 0
 	})
+	sspan.End()
 	return &pendingWritesIterator{
 		readTs:   txn.readTs,
 		entries:  entries,
@@ -259,33 +266,39 @@ func (txn *Txn) checkSize(e *Entry) error {
 //
 // It will return ErrReadOnlyTxn if update flag was set to false when creating the
 // transaction.
-func (txn *Txn) Set(key, val []byte) error {
+func (txn *Txn) Set(ctx context.Context, key, val []byte) error {
+	ctx, span := octrace.StartSpan(ctx, "Txn.Set")
 	e := &Entry{
 		Key:   key,
 		Value: val,
 	}
-	return txn.SetEntry(e)
+	err := txn.SetEntry(ctx, e)
+	span.End()
+	return err
 }
 
 // SetWithMeta adds a key-value pair to the database, along with a metadata
 // byte. This byte is stored alongside the key, and can be used as an aid to
 // interpret the value or store other contextual bits corresponding to the
 // key-value pair.
-func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
+func (txn *Txn) SetWithMeta(ctx context.Context, key, val []byte, meta byte) error {
 	e := &Entry{Key: key, Value: val, UserMeta: meta}
-	return txn.SetEntry(e)
+	return txn.SetEntry(ctx, e)
 }
 
 // SetWithTTL adds a key-value pair to the database, along with a time-to-live
 // (TTL) setting. A key stored with with a TTL would automatically expire after
 // the time has elapsed , and be eligible for garbage collection.
-func (txn *Txn) SetWithTTL(key, val []byte, dur time.Duration) error {
+func (txn *Txn) SetWithTTL(ctx context.Context, key, val []byte, dur time.Duration) error {
 	expire := time.Now().Add(dur).Unix()
 	e := &Entry{Key: key, Value: val, ExpiresAt: uint64(expire)}
-	return txn.SetEntry(e)
+	return txn.SetEntry(ctx, e)
 }
 
-func (txn *Txn) modify(e *Entry, operation int) error {
+func (txn *Txn) modify(ctx context.Context, e *Entry, operation int) error {
+	ctx, span := octrace.StartSpan(ctx, "Txn.modify")
+	defer span.End()
+
 	if !txn.update {
 		return ErrReadOnlyTxn
 	} else if txn.discarded {
@@ -309,24 +322,33 @@ func (txn *Txn) modify(e *Entry, operation int) error {
 
 // SetEntry takes an Entry struct and adds the key-value pair in the struct, along
 // with other metadata to the database.
-func (txn *Txn) SetEntry(e *Entry) error {
-	return txn.modify(e, setItem)
+func (txn *Txn) SetEntry(ctx context.Context, e *Entry) error {
+	ctx, span := octrace.StartSpan(ctx, "Txn.SetEntry")
+	err := txn.modify(ctx, e, setItem)
+	span.End()
+	return err
 }
 
 // Delete deletes a key. This is done by adding a delete marker for the key at commit timestamp.
 // Any reads happening before this timestamp would be unaffected. Any reads after this commit would
 // see the deletion.
-func (txn *Txn) Delete(key []byte) error {
+func (txn *Txn) Delete(ctx context.Context, key []byte) error {
+	ctx, span := octrace.StartSpan(ctx, "Txn.Delete")
 	e := &Entry{
 		Key:  key,
 		meta: bitDelete,
 	}
-	return txn.modify(e, deleteItem)
+	err := txn.modify(ctx, e, deleteItem)
+	span.End()
+	return err
 }
 
 // Get looks for key and returns corresponding Item.
 // If key is not found, ErrKeyNotFound is returned.
-func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
+func (txn *Txn) Get(ctx context.Context, key []byte) (item *Item, rerr error) {
+	ctx, span := octrace.StartSpan(ctx, "Txn.Get")
+	defer span.End()
+
 	if len(key) == 0 {
 		return nil, ErrEmptyKey
 	} else if txn.discarded {
@@ -389,7 +411,10 @@ func (txn *Txn) runCallbacks() {
 // this can safely be called via a defer right when transaction is created.
 //
 // NOTE: If any operations are run on a discarded transaction, ErrDiscardedTxn is returned.
-func (txn *Txn) Discard() {
+func (txn *Txn) Discard(ctx context.Context) {
+	ctx, span := octrace.StartSpan(ctx, "Txn.Discard")
+	defer span.End()
+
 	if txn.discarded { // Avoid a re-run.
 		return
 	}
@@ -419,14 +444,17 @@ func (txn *Txn) Discard() {
 //
 // If error is nil, the transaction is successfully committed. In case of a non-nil error, the LSM
 // tree won't be updated, so there's no need for any rollback.
-func (txn *Txn) Commit(callback func(error)) error {
+func (txn *Txn) Commit(ctx context.Context, callback func(error)) error {
+	ctx, span := octrace.StartSpan(ctx, "Txn.Commit")
+	defer span.End()
+
 	if txn.commitTs == 0 && txn.db.opt.managedTxns {
 		return ErrManagedTxn
 	}
 	if txn.discarded {
 		return ErrDiscardedTxn
 	}
-	defer txn.Discard()
+	defer txn.Discard(ctx)
 	if len(txn.writes) == 0 {
 		return nil // Nothing to do.
 	}
@@ -454,7 +482,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 	}
 	entries = append(entries, e)
 
-	req, err := txn.db.sendToWriteCh(entries)
+	req, err := txn.db.sendToWriteCh(ctx, entries)
 	state.writeLock.Unlock()
 	if err != nil {
 		return err
@@ -500,7 +528,10 @@ func (txn *Txn) Commit(callback func(error)) error {
 //  txn := db.NewTransaction(false)
 //  defer txn.Discard()
 //  // Call various APIs.
-func (db *DB) NewTransaction(update bool) *Txn {
+func (db *DB) NewTransaction(ctx context.Context, update bool) *Txn {
+	ctx, span := octrace.StartSpan(ctx, "Db.NewTransaction")
+	defer span.End()
+
 	if db.opt.ReadOnly && update {
 		// DB is read-only, force read-only transaction.
 		update = false
@@ -522,28 +553,34 @@ func (db *DB) NewTransaction(update bool) *Txn {
 
 // View executes a function creating and managing a read-only transaction for the user. Error
 // returned by the function is relayed by the View method.
-func (db *DB) View(fn func(txn *Txn) error) error {
+func (db *DB) View(ctx context.Context, fn func(ctx context.Context, txn *Txn) error) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.View")
+	defer span.End()
+
 	if db.opt.managedTxns {
 		return ErrManagedTxn
 	}
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
+	txn := db.NewTransaction(ctx, false)
+	defer txn.Discard(ctx)
 
-	return fn(txn)
+	return fn(ctx, txn)
 }
 
 // Update executes a function, creating and managing a read-write transaction
 // for the user. Error returned by the function is relayed by the Update method.
-func (db *DB) Update(fn func(txn *Txn) error) error {
+func (db *DB) Update(ctx context.Context, fn func(ctx context.Context, txn *Txn) error) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.Update")
+	defer span.End()
+
 	if db.opt.managedTxns {
 		return ErrManagedTxn
 	}
-	txn := db.NewTransaction(true)
-	defer txn.Discard()
+	txn := db.NewTransaction(ctx, true)
+	defer txn.Discard(ctx)
 
-	if err := fn(txn); err != nil {
+	if err := fn(ctx, txn); err != nil {
 		return err
 	}
 
-	return txn.Commit(nil)
+	return txn.Commit(ctx, nil)
 }

@@ -40,6 +40,9 @@ import (
 	"github.com/dgraph-io/badger/y"
 	"github.com/pkg/errors"
 	"golang.org/x/net/trace"
+
+	octrace "go.opencensus.io/trace"
+	"golang.org/x/net/context"
 )
 
 // Values have their first byte being byteData or byteDelete. This helps us distinguish between
@@ -320,7 +323,10 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, readOnly bool, fn logE
 	return nil
 }
 
-func (vlog *valueLog) rewrite(f *logFile) error {
+func (vlog *valueLog) rewrite(ctx context.Context, f *logFile) error {
+	ctx, span := octrace.StartSpan(ctx, "valueLog.rewrite")
+	defer span.End()
+
 	maxFid := atomic.LoadUint32(&vlog.maxFid)
 	y.AssertTruef(uint32(f.fid) < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
 
@@ -373,7 +379,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 			size += int64(e.estimateSize(vlog.opt.ValueThreshold))
 			if size >= 64*mi {
 				elog.Printf("request has %d entries, size %d", len(wb), size)
-				if err := vlog.kv.batchSet(wb); err != nil {
+				if err := vlog.kv.batchSet(ctx, wb); err != nil {
 					return err
 				}
 				size = 0
@@ -405,7 +411,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 		if end > len(wb) {
 			end = len(wb)
 		}
-		if err := vlog.kv.batchSet(wb[i:end]); err != nil {
+		if err := vlog.kv.batchSet(ctx, wb[i:end]); err != nil {
 			if err == ErrTxnTooBig {
 				// Decrease the batch size to half.
 				batchSize = batchSize / 2
@@ -950,7 +956,10 @@ func discardEntry(e Entry, vs y.ValueStruct) bool {
 	return false
 }
 
-func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error) {
+func (vlog *valueLog) doRunGC(ctx context.Context, gcThreshold float64, head valuePointer) (err error) {
+	ctx, span := octrace.StartSpan(ctx, "valueLog.doRunGC")
+	defer span.End()
+
 	// Pick a log file for GC
 	lf := vlog.pickLog(head)
 	if lf == nil {
@@ -1059,7 +1068,7 @@ func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error
 	}
 
 	vlog.elog.Printf("REWRITING VLOG %d\n", lf.fid)
-	if err = vlog.rewrite(lf); err != nil {
+	if err = vlog.rewrite(ctx, lf); err != nil {
 		return err
 	}
 	vlog.elog.Printf("Done rewriting.")
@@ -1076,7 +1085,10 @@ func (vlog *valueLog) waitOnGC(lc *y.Closer) {
 	vlog.garbageCh <- struct{}{}
 }
 
-func (vlog *valueLog) runGC(gcThreshold float64, head valuePointer) error {
+func (vlog *valueLog) runGC(ctx context.Context, gcThreshold float64, head valuePointer) error {
+	ctx, span := octrace.StartSpan(ctx, "valueLog.runGC")
+	defer span.End()
+
 	select {
 	case vlog.garbageCh <- struct{}{}:
 		// Run GC
@@ -1085,7 +1097,7 @@ func (vlog *valueLog) runGC(gcThreshold float64, head valuePointer) error {
 			count int
 		)
 		for {
-			err = vlog.doRunGC(gcThreshold, head)
+			err = vlog.doRunGC(ctx, gcThreshold, head)
 			if err != nil {
 				break
 			}

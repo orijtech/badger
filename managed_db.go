@@ -16,6 +16,11 @@
 
 package badger
 
+import (
+	octrace "go.opencensus.io/trace"
+	"golang.org/x/net/context"
+)
+
 // ManagedDB allows end users to manage the transactions themselves. Transaction
 // start and commit timestamps are set by end-user.
 //
@@ -33,9 +38,11 @@ type ManagedDB struct {
 //
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
-func OpenManaged(opts Options) (*ManagedDB, error) {
+func OpenManaged(ctx context.Context, opts Options) (*ManagedDB, error) {
+	ctx, span := octrace.StartSpan(ctx, "OpenManaged")
+	defer span.End()
 	opts.managedTxns = true
-	db, err := Open(opts)
+	db, err := Open(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -53,9 +60,11 @@ func (db *ManagedDB) NewTransaction(update bool) {
 //
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
-func (db *ManagedDB) NewTransactionAt(readTs uint64, update bool) *Txn {
-	txn := db.DB.NewTransaction(update)
+func (db *ManagedDB) NewTransactionAt(ctx context.Context, readTs uint64, update bool) *Txn {
+	ctx, span := octrace.StartSpan(ctx, "ManagedDB.NewTransactionAt")
+	txn := db.DB.NewTransaction(ctx, update)
 	txn.readTs = readTs
+	span.End()
 	return txn
 }
 
@@ -64,19 +73,22 @@ func (db *ManagedDB) NewTransactionAt(readTs uint64, update bool) *Txn {
 //
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
-func (txn *Txn) CommitAt(commitTs uint64, callback func(error)) error {
+func (txn *Txn) CommitAt(ctx context.Context, commitTs uint64, callback func(error)) error {
+	ctx, span := octrace.StartSpan(ctx, "Txn.CommitAt")
+	defer span.End()
+
 	if !txn.db.opt.managedTxns {
 		return ErrManagedTxn
 	}
 	txn.commitTs = commitTs
-	return txn.Commit(callback)
+	return txn.Commit(ctx, callback)
 }
 
 // PurgeVersionsBelow will delete all versions of a key below the specified version
-func (db *ManagedDB) PurgeVersionsBelow(key []byte, ts uint64) error {
-	txn := db.NewTransactionAt(ts, false)
-	defer txn.Discard()
-	return db.purgeVersionsBelow(txn, key, ts)
+func (db *ManagedDB) PurgeVersionsBelow(ctx context.Context, key []byte, ts uint64) error {
+	txn := db.NewTransactionAt(ctx, ts, false)
+	defer txn.Discard(ctx)
+	return db.purgeVersionsBelow(ctx, txn, key, ts)
 }
 
 // GetSequence is not supported on ManagedDB. Calling this would result

@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -39,9 +40,11 @@ func TestManifestBasic(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
+	ctx := context.Background()
+
 	opt := getTestOptions(dir)
 	{
-		kv, err := Open(opt)
+		kv, err := Open(ctx, opt)
 		require.NoError(t, err)
 		n := 5000
 		for i := 0; i < n; i++ {
@@ -49,24 +52,24 @@ func TestManifestBasic(t *testing.T) {
 				fmt.Printf("Putting i=%d\n", i)
 			}
 			k := []byte(fmt.Sprintf("%16x", rand.Int63()))
-			txnSet(t, kv, k, k, 0x00)
+			txnSet(ctx, t, kv, k, k, 0x00)
 		}
-		txnSet(t, kv, []byte("testkey"), []byte("testval"), 0x05)
+		txnSet(ctx, t, kv, []byte("testkey"), []byte("testval"), 0x05)
 		kv.validate()
-		require.NoError(t, kv.Close())
+		require.NoError(t, kv.Close(ctx))
 	}
 
-	kv, err := Open(opt)
+	kv, err := Open(ctx, opt)
 	require.NoError(t, err)
 
-	require.NoError(t, kv.View(func(txn *Txn) error {
-		item, err := txn.Get([]byte("testkey"))
+	require.NoError(t, kv.View(ctx, func(ctx context.Context, txn *Txn) error {
+		item, err := txn.Get(ctx, []byte("testkey"))
 		require.NoError(t, err)
 		require.EqualValues(t, "testval", string(getItemValue(t, item)))
 		require.EqualValues(t, byte(0x05), item.UserMeta())
 		return nil
 	}))
-	require.NoError(t, kv.Close())
+	require.NoError(t, kv.Close(ctx))
 }
 
 func helpTestManifestFileCorruption(t *testing.T, off int64, errorContent string) {
@@ -74,11 +77,12 @@ func helpTestManifestFileCorruption(t *testing.T, off int64, errorContent string
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
+	ctx := context.Background()
 	opt := getTestOptions(dir)
 	{
-		kv, err := Open(opt)
+		kv, err := Open(ctx, opt)
 		require.NoError(t, err)
-		require.NoError(t, kv.Close())
+		require.NoError(t, kv.Close(ctx))
 	}
 	fp, err := os.OpenFile(filepath.Join(dir, ManifestFilename), os.O_RDWR, 0)
 	require.NoError(t, err)
@@ -86,10 +90,10 @@ func helpTestManifestFileCorruption(t *testing.T, off int64, errorContent string
 	_, err = fp.WriteAt([]byte{'X'}, off)
 	require.NoError(t, err)
 	require.NoError(t, fp.Close())
-	kv, err := Open(opt)
+	kv, err := Open(ctx, opt)
 	defer func() {
 		if kv != nil {
-			kv.Close()
+			kv.Close(ctx)
 		}
 	}()
 	require.Error(t, err)
@@ -163,7 +167,8 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	opt := DefaultOptions
 	opt.Dir = dir
 	opt.ValueDir = dir
-	kv, err := Open(opt)
+	ctx := context.Background()
+	kv, err := Open(ctx, opt)
 	require.NoError(t, err)
 
 	lh0 := newLevelHandler(kv, 0)
@@ -182,7 +187,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		elog:      trace.New("Badger", "Compact"),
 	}
 
-	manifest := createManifest()
+	manifest := createManifest(ctx)
 	lc, err := newLevelsController(kv, &manifest)
 	require.NoError(t, err)
 	done = lc.fillTablesL0(&cd)
@@ -210,7 +215,8 @@ func TestManifestRewrite(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	deletionsThreshold := 10
-	mf, m, err := helpOpenOrCreateManifestFile(dir, false, deletionsThreshold)
+	ctx := context.Background()
+	mf, m, err := helpOpenOrCreateManifestFile(ctx, dir, false, deletionsThreshold)
 	defer func() {
 		if mf != nil {
 			mf.close()
@@ -236,7 +242,7 @@ func TestManifestRewrite(t *testing.T) {
 	err = mf.close()
 	require.NoError(t, err)
 	mf = nil
-	mf, m, err = helpOpenOrCreateManifestFile(dir, false, deletionsThreshold)
+	mf, m, err = helpOpenOrCreateManifestFile(ctx, dir, false, deletionsThreshold)
 	require.NoError(t, err)
 	require.Equal(t, map[uint64]tableManifest{
 		uint64(deletionsThreshold * 3): {Level: 0},

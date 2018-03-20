@@ -30,6 +30,9 @@ import (
 	"github.com/dgraph-io/badger/protos"
 	"github.com/dgraph-io/badger/y"
 	"github.com/pkg/errors"
+
+	octrace "go.opencensus.io/trace"
+	"golang.org/x/net/context"
 )
 
 // Manifest represents the contents of the MANIFEST file in a Badger store.
@@ -50,7 +53,10 @@ type Manifest struct {
 	Deletions int
 }
 
-func createManifest() Manifest {
+func createManifest(ctx context.Context) Manifest {
+	_, span := octrace.StartSpan(ctx, "createManifest")
+	defer span.End()
+
 	levels := make([]levelManifest, 0)
 	return Manifest{
 		Levels: levels,
@@ -103,20 +109,25 @@ func (m *Manifest) asChanges() []*protos.ManifestChange {
 	return changes
 }
 
-func (m *Manifest) clone() Manifest {
+func (m *Manifest) clone(ctx context.Context) Manifest {
+	ctx, span := octrace.StartSpan(ctx, "Manifest.clone")
 	changeSet := protos.ManifestChangeSet{Changes: m.asChanges()}
-	ret := createManifest()
+	ret := createManifest(ctx)
 	y.Check(applyChangeSet(&ret, &changeSet))
+	span.End()
 	return ret
 }
 
 // openOrCreateManifestFile opens a Badger manifest file if it exists, or creates on if
 // one doesn’t.
-func openOrCreateManifestFile(dir string, readOnly bool) (ret *manifestFile, result Manifest, err error) {
-	return helpOpenOrCreateManifestFile(dir, readOnly, manifestDeletionsRewriteThreshold)
+func openOrCreateManifestFile(ctx context.Context, dir string, readOnly bool) (ret *manifestFile, result Manifest, err error) {
+	return helpOpenOrCreateManifestFile(ctx, dir, readOnly, manifestDeletionsRewriteThreshold)
 }
 
-func helpOpenOrCreateManifestFile(dir string, readOnly bool, deletionsThreshold int) (ret *manifestFile, result Manifest, err error) {
+func helpOpenOrCreateManifestFile(ctx context.Context, dir string, readOnly bool, deletionsThreshold int) (ret *manifestFile, result Manifest, err error) {
+	ctx, span := octrace.StartSpan(ctx, "helpOpenOrCreateManifestFile")
+	defer span.End()
+
 	path := filepath.Join(dir, ManifestFilename)
 	var flags uint32
 	if readOnly {
@@ -130,7 +141,7 @@ func helpOpenOrCreateManifestFile(dir string, readOnly bool, deletionsThreshold 
 		if readOnly {
 			return nil, Manifest{}, fmt.Errorf("no manifest found, required for read-only db")
 		}
-		m := createManifest()
+		m := createManifest(ctx)
 		fp, netCreations, err := helpRewrite(dir, &m)
 		if err != nil {
 			return nil, Manifest{}, err
@@ -139,13 +150,13 @@ func helpOpenOrCreateManifestFile(dir string, readOnly bool, deletionsThreshold 
 		mf := &manifestFile{
 			fp:                        fp,
 			directory:                 dir,
-			manifest:                  m.clone(),
+			manifest:                  m.clone(ctx),
 			deletionsRewriteThreshold: deletionsThreshold,
 		}
 		return mf, m, nil
 	}
 
-	manifest, truncOffset, err := ReplayManifestFile(fp)
+	manifest, truncOffset, err := ReplayManifestFile(ctx, fp)
 	if err != nil {
 		_ = fp.Close()
 		return nil, Manifest{}, err
@@ -166,7 +177,7 @@ func helpOpenOrCreateManifestFile(dir string, readOnly bool, deletionsThreshold 
 	mf := &manifestFile{
 		fp:                        fp,
 		directory:                 dir,
-		manifest:                  manifest.clone(),
+		manifest:                  manifest.clone(ctx),
 		deletionsRewriteThreshold: deletionsThreshold,
 	}
 	return mf, manifest, nil
@@ -325,7 +336,10 @@ var (
 // Also, returns the last offset after a completely read manifest entry -- the file must be
 // truncated at that point before further appends are made (if there is a partial entry after
 // that).  In normal conditions, truncOffset is the file size.
-func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error) {
+func ReplayManifestFile(ctx context.Context, fp *os.File) (ret Manifest, truncOffset int64, err error) {
+	ctx, span := octrace.StartSpan(ctx, "ReplayManifestFile")
+	defer span.End()
+
 	r := countingReader{wrapped: bufio.NewReader(fp)}
 
 	var magicBuf [8]byte
@@ -341,7 +355,7 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 			fmt.Errorf("manifest has unsupported version: %d (we support %d)", version, magicVersion)
 	}
 
-	build := createManifest()
+	build := createManifest(ctx)
 	var offset int64
 	for {
 		offset = r.count

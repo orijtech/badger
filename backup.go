@@ -6,6 +6,9 @@ import (
 	"io"
 	"sync"
 
+	octrace "go.opencensus.io/trace"
+	"golang.org/x/net/context"
+
 	"github.com/dgraph-io/badger/y"
 
 	"github.com/dgraph-io/badger/protos"
@@ -30,12 +33,18 @@ func writeTo(entry *protos.KVPair, w io.Writer) error {
 // added/modified since the last invocation of DB.Backup()
 //
 // This can be used to backup the data in a database at a given point in time.
-func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
+func (db *DB) Backup(ctx context.Context, w io.Writer, since uint64) (uint64, error) {
+	ctx, span := octrace.StartSpan(ctx, "DB.Backup")
+	defer span.End()
+
 	var tsNew uint64
-	err := db.View(func(txn *Txn) error {
+	err := db.View(ctx, func(ctx context.Context, txn *Txn) error {
+		ctx, span := octrace.StartSpan(ctx, "DB.View/Backup")
+		defer span.End()
+
 		opts := DefaultIteratorOptions
 		opts.AllVersions = true
-		it := txn.NewIterator(opts)
+		it := txn.NewIterator(ctx, opts)
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
 			if item.Version() < since {
@@ -72,7 +81,10 @@ func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
 //
 // DB.Load() should be called on a database that is not running any other
 // concurrent transactions while it is running.
-func (db *DB) Load(r io.Reader) error {
+func (db *DB) Load(ctx context.Context, r io.Reader) error {
+	ctx, span := octrace.StartSpan(ctx, "DB.Load")
+	defer span.End()
+
 	br := bufio.NewReaderSize(r, 16<<10)
 	unmarshalBuf := make([]byte, 1<<10)
 	var entries []*Entry
@@ -80,13 +92,16 @@ func (db *DB) Load(r io.Reader) error {
 	errChan := make(chan error, 1)
 
 	// func to check for pending error before sending off a batch for writing
-	batchSetAsyncIfNoErr := func(entries []*Entry) error {
+	batchSetAsyncIfNoErr := func(ctx context.Context, entries []*Entry) error {
+		ctx, span := octrace.StartSpan(ctx, "batchSetAsyncIfNoErr")
+		defer span.End()
+
 		select {
 		case err := <-errChan:
 			return err
 		default:
 			wg.Add(1)
-			return db.batchSetAsync(entries, func(err error) {
+			return db.batchSetAsync(ctx, entries, func(err error) {
 				defer wg.Done()
 				if err != nil {
 					select {
@@ -131,7 +146,7 @@ func (db *DB) Load(r io.Reader) error {
 		}
 
 		if len(entries) == 1000 {
-			if err := batchSetAsyncIfNoErr(entries); err != nil {
+			if err := batchSetAsyncIfNoErr(ctx, entries); err != nil {
 				return err
 			}
 			entries = make([]*Entry, 0, 1000)
@@ -139,7 +154,7 @@ func (db *DB) Load(r io.Reader) error {
 	}
 
 	if len(entries) > 0 {
-		if err := batchSetAsyncIfNoErr(entries); err != nil {
+		if err := batchSetAsyncIfNoErr(ctx, entries); err != nil {
 			return err
 		}
 	}
